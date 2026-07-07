@@ -63,8 +63,17 @@ bool SyringeDebugger::SetBP(void* address)
     if (auto& opcode = Breakpoints[address].original_opcode; opcode == 0x00)
     {
         auto const buffer = INT3;
-        ReadMem(address, &opcode, 1);
-        return PatchMem(address, &buffer, 1);
+        auto const readOk = ReadMem(address, &opcode, 1);
+        auto const patchOk = PatchMem(address, &buffer, 1);
+
+        BYTE verify = 0;
+        auto const verifyOk = ReadMem(address, &verify, 1);
+        Log::WriteLine(
+            "[WINEDIAG] SetBP(0x%08X): readOk=%d original=0x%02X patchOk=%d "
+            "verifyReadOk=%d verifyByte=0x%02X (expect 0xCC)",
+            address, readOk, opcode, patchOk, verifyOk, verify);
+
+        return patchOk;
     }
 
     return true;
@@ -331,6 +340,12 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
     auto const exceptCode = dbgEvent.u.Exception.ExceptionRecord.ExceptionCode;
     auto const exceptAddr = dbgEvent.u.Exception.ExceptionRecord.ExceptionAddress;
 
+    Log::WriteLine(
+        "[WINEDIAG] HandleException: code=0x%08X addr=0x%08X pcEntryPoint=0x%08X "
+        "firstChance=%d bEntryBP=%d bDLLsLoaded=%d bHooksCreated=%d",
+        exceptCode, exceptAddr, pcEntryPoint,
+        dbgEvent.u.Exception.dwFirstChance, bEntryBP, bDLLsLoaded, bHooksCreated);
+
     if (exceptCode == EXCEPTION_BREAKPOINT)
     {
         auto& threadInfo = Threads[dbgEvent.dwThreadId];
@@ -338,11 +353,15 @@ DWORD SyringeDebugger::HandleException(DEBUG_EVENT const& dbgEvent)
         CONTEXT context;
 
         context.ContextFlags = CONTEXT_CONTROL;
-        GetThreadContext(currentThread, &context);
+        auto const gtcOk = GetThreadContext(currentThread, &context);
+        Log::WriteLine(
+            "[WINEDIAG] GetThreadContext ok=%d Eip=0x%08X EFlags=0x%08X",
+            gtcOk, context.Eip, context.EFlags);
 
         // entry breakpoint
         if (bEntryBP)
         {
+            Log::WriteLine("[WINEDIAG] Consuming initial system entry breakpoint.");
             bEntryBP = false;
             return DBG_CONTINUE;
         }
@@ -842,10 +861,15 @@ void SyringeDebugger::Run(std::string_view const arguments)
     loop_LoadLibrary = v_AllHooks.end();
 
     // set breakpoint
-    SetBP(pcEntryPoint);
+    Log::WriteLine("[WINEDIAG] About to SetBP at pcEntryPoint=0x%08X", pcEntryPoint);
+    auto const setBpOk = SetBP(pcEntryPoint);
+    Log::WriteLine("[WINEDIAG] SetBP(pcEntryPoint) returned %d", setBpOk);
 
     DEBUG_EVENT dbgEvent;
-    ResumeThread(pInfo.hThread);
+    auto const resumeResult = ResumeThread(pInfo.hThread);
+    Log::WriteLine(
+        "[WINEDIAG] ResumeThread returned %d (prev suspend count), GetLastError=%u",
+        resumeResult, GetLastError());
 
     bAVLogged = false;
 
@@ -855,7 +879,11 @@ void SyringeDebugger::Run(std::string_view const arguments)
 
     while (true)
     {
-        WaitForDebugEvent(&dbgEvent, INFINITE);
+        auto const waitOk = WaitForDebugEvent(&dbgEvent, INFINITE);
+
+        Log::WriteLine(
+            "[WINEDIAG] WaitForDebugEvent ok=%d code=%u pid=%u tid=%u",
+            waitOk, dbgEvent.dwDebugEventCode, dbgEvent.dwProcessId, dbgEvent.dwThreadId);
 
         DWORD continueStatus = DBG_CONTINUE;
         bool wasSingleStep = false;
@@ -863,6 +891,11 @@ void SyringeDebugger::Run(std::string_view const arguments)
         switch (dbgEvent.dwDebugEventCode)
         {
         case CREATE_PROCESS_DEBUG_EVENT:
+            Log::WriteLine(
+                "[WINEDIAG] CREATE_PROCESS_DEBUG_EVENT hProcess=0x%08X hThread=0x%08X "
+                "lpBaseOfImage=0x%08X",
+                dbgEvent.u.CreateProcessInfo.hProcess, dbgEvent.u.CreateProcessInfo.hThread,
+                dbgEvent.u.CreateProcessInfo.lpBaseOfImage);
             workingHandle = dbgEvent.u.CreateProcessInfo.hProcess;
             Threads.emplace(dbgEvent.dwThreadId, dbgEvent.u.CreateProcessInfo.hThread);
             CloseHandle(dbgEvent.u.CreateProcessInfo.hFile);
