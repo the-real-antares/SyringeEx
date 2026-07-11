@@ -39,7 +39,16 @@ void SyringeDebugger::DebugProcess(std::string_view const arguments)
 
 bool SyringeDebugger::PatchMem(void* address, void const* buffer, DWORD size)
 {
-    return (WriteProcessMemory(workingHandle, address, buffer, size, nullptr) != FALSE);
+    if (WriteProcessMemory(workingHandle, address, buffer, size, nullptr) == FALSE)
+        return false;
+
+    // The x86->ARM64 translators used by CrossOver (and Wine) on Apple Silicon keep executing a
+    // code page's already-cached translation after WriteProcessMemory unless the instruction
+    // cache is explicitly flushed - so a freshly patched entry point or trampoline runs stale
+    // and faults. FlushInstructionCache forces a re-translation. It is a cheap no-op on native
+    // Windows and on translators that already invalidate on write.
+    FlushInstructionCache(workingHandle, address, size);
+    return true;
 }
 
 bool SyringeDebugger::ReadMem(void const* address, void* buffer, DWORD size)
